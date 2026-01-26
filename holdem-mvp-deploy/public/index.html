@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hold'em MVP</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">♠ Hold'em MVP</div>
+    <div class="tag">Private rooms · Share a code · Play with friends</div>
+  </header>
+
+  <main class="wrap">
+    <!-- Landing / Lobby join -->
+    <section id="screen-join" class="card">
+      <h1>Play Texas Hold'em with friends</h1>
+      <p class="muted">Host creates a lobby, shares the room code, friends join — like PokerPatio/247 style (but this is a simple MVP).</p>
+
+      <div class="grid2">
+        <div class="panel">
+          <h2>Create lobby (host)</h2>
+          <label>
+            Your name
+            <input id="hostName" placeholder="e.g. Alex" maxlength="20"/>
+          </label>
+          <button id="btnCreate" class="primary">Create lobby</button>
+          <p class="muted small">You'll get a room code to share.</p>
+        </div>
+
+        <div class="panel">
+          <h2>Join lobby</h2>
+          <label>
+            Your name
+            <input id="joinName" placeholder="e.g. Sam" maxlength="20"/>
+          </label>
+          <label>
+            Room code
+            <input id="roomCode" placeholder="ABC123" maxlength="10" style="text-transform:uppercase"/>
+          </label>
+          <button id="btnJoin">Join</button>
+          <p id="joinError" class="error small"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- In-room screen -->
+    <section id="screen-room" class="card hidden">
+      <div class="roomHeader">
+        <div>
+          <h2>Room <span id="roomCodeLabel" class="code"></span></h2>
+          <div class="muted small">Share this code with friends. Keep it private.</div>
+        </div>
+        <div class="hostControls" id="hostControls">
+          <div class="inline">
+            <label class="small">SB <input id="sbInput" type="number" min="1" step="1" value="10" /></label>
+            <label class="small">BB <input id="bbInput" type="number" min="2" step="1" value="20" /></label>
+            <button id="btnSetBlinds">Set blinds</button>
+          </div>
+          <button id="btnStart" class="primary">Start game</button>
+        </div>
+      </div>
+
+      <div class="table">
+        <div class="community">
+          <div class="kpi">
+            <div class="kpiLabel">Stage</div>
+            <div id="stageLabel" class="kpiValue">—</div>
+          </div>
+          <div class="kpi">
+            <div class="kpiLabel">Pot</div>
+            <div id="potLabel" class="kpiValue">0</div>
+          </div>
+          <div class="kpi">
+            <div class="kpiLabel">To call</div>
+            <div id="callLabel" class="kpiValue">0</div>
+          </div>
+
+          <div class="cardsRow" id="communityCards"></div>
+        </div>
+
+        <div class="players" id="players"></div>
+
+        <div class="yourHand">
+          <h3>Your hand</h3>
+          <div class="cardsRow" id="yourCards"></div>
+          <div class="actions">
+            <button id="btnFold" class="danger">Fold</button>
+            <button id="btnCheckCall" class="primary">Check</button>
+            <div class="raiseBox">
+              <input id="raiseAmount" type="number" min="1" step="1" placeholder="Raise to…" />
+              <button id="btnRaise">Bet/Raise</button>
+            </div>
+          </div>
+          <div class="muted small" id="turnHint"></div>
+        </div>
+
+        <div class="side">
+          <h3>Chat / log</h3>
+          <div id="log" class="log"></div>
+          <div class="chatBar">
+            <input id="chatInput" placeholder="Say something…" maxlength="160"/>
+            <button id="btnChat">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="muted small">
+        MVP notes: joining only works in the lobby; odd-chip rule is simplified; no security against cheating beyond server validation.
+      </div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/client.js"></script>
+</body>
+</html>
