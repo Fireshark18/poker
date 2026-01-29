@@ -62,46 +62,59 @@
         </div>
       </div>
 
-      <div class="table">
-        <div class="community">
-          <div class="kpi">
-            <div class="kpiLabel">Stage</div>
-            <div id="stageLabel" class="kpiValue">—</div>
+      <div class="tableWrapper">
+        <!-- Poker Table -->
+        <div class="pokerTable">
+          <div class="tableCenter">
+            <div class="potArea">
+              <div class="potLabel">Pot</div>
+              <div id="potLabel" class="potValue">0</div>
+            </div>
+            <div class="stageArea">
+              <div class="stageLabel">Stage</div>
+              <div id="stageLabel" class="stageValue">—</div>
+            </div>
+            <div class="communityCards" id="communityCards"></div>
           </div>
-          <div class="kpi">
-            <div class="kpiLabel">Pot</div>
-            <div id="potLabel" class="kpiValue">0</div>
-          </div>
-          <div class="kpi">
-            <div class="kpiLabel">To call</div>
-            <div id="callLabel" class="kpiValue">0</div>
-          </div>
-
-          <div class="cardsRow" id="communityCards"></div>
+          
+          <div class="seatsContainer" id="seatsContainer"></div>
         </div>
 
-        <div class="players" id="players"></div>
-
-        <div class="yourHand">
-          <h3>Your hand</h3>
-          <div class="cardsRow" id="yourCards"></div>
-          <div class="actions">
-            <button id="btnFold" class="danger">Fold</button>
-            <button id="btnCheckCall" class="primary">Check</button>
-            <div class="raiseBox">
-              <input id="raiseAmount" type="number" min="1" step="1" placeholder="Raise to…" />
-              <button id="btnRaise">Bet/Raise</button>
+        <!-- Right Sidebar -->
+        <div class="sidebar">
+          <!-- Your Hand -->
+          <div class="yourHandPanel">
+            <h3>Your Hand</h3>
+            <div class="cardsRow" id="yourCards"></div>
+            <div class="kpiSmall">
+              <div class="toCall">
+                <span class="label">To Call:</span>
+                <span id="callLabel" class="value">0</span>
+              </div>
             </div>
           </div>
-          <div class="muted small" id="turnHint"></div>
-        </div>
 
-        <div class="side">
-          <h3>Chat / log</h3>
-          <div id="log" class="log"></div>
-          <div class="chatBar">
-            <input id="chatInput" placeholder="Say something…" maxlength="160"/>
-            <button id="btnChat">Send</button>
+          <!-- Action Buttons -->
+          <div class="actionPanel">
+            <div class="actionButtons">
+              <button id="btnFold" class="btn-fold">Fold</button>
+              <button id="btnCheckCall" class="btn-check-call">Check</button>
+            </div>
+            <div class="raiseBox">
+              <input id="raiseAmount" type="number" min="1" step="1" placeholder="Raise to…" />
+              <button id="btnRaise" class="btn-raise">Bet/Raise</button>
+            </div>
+            <div class="muted small" id="turnHint"></div>
+          </div>
+
+          <!-- Chat/Log -->
+          <div class="chatPanel">
+            <h3>Chat</h3>
+            <div id="log" class="log"></div>
+            <div class="chatBar">
+              <input id="chatInput" placeholder="Say something…" maxlength="160"/>
+              <button id="btnChat">Send</button>
+            </div>
           </div>
         </div>
       </div>
@@ -110,6 +123,35 @@
         MVP notes: joining only works in the lobby; odd-chip rule is simplified; no security against cheating beyond server validation.
       </div>
     </section>
+
+    <!-- Winner Modal -->
+    <div id="winnerModal" class="modal hidden">
+      <div class="modalContent">
+        <div class="modalHeader">
+          <h2>Hand Over</h2>
+        </div>
+        <div class="modalBody">
+          <div class="winnerSection">
+            <div class="winnerCrown">👑</div>
+            <div id="winnerName" class="winnerName">Player Name</div>
+            <div id="winnerAmount" class="winnerAmount">+1000</div>
+          </div>
+          <div class="winnerDetails">
+            <div class="detailRow">
+              <span class="label">Winning Hand:</span>
+              <span id="winnerHand" class="value">Pair of Aces</span>
+            </div>
+            <div class="detailRow">
+              <span class="label">Details:</span>
+              <span id="winnerDescription" class="value">Aces with King kicker</span>
+            </div>
+          </div>
+        </div>
+        <div class="modalFooter">
+          <button id="btnNextHand" class="primary">Next Hand</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script src="/socket.io/socket.io.js"></script>

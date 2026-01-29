@@ -130,6 +130,7 @@ function resetForNewHand(room) {
   room.currentSeat = null;
   room.lastActionAt = Date.now();
   room.handOverAt = null;
+  room.winnerInfo = null;
 
   for (const p of room.players) {
     p.folded = false;
@@ -253,9 +254,47 @@ function advanceStage(room) {
     addLog(room, `River: ${prettyCard(room.community[4])}`);
     startBettingRound(room);
   } else if (room.stage === "river") {
-    room.state = "showdown";
+    // Enter reveal state so clients can animate showing hole cards
+    room.state = "reveal";
     room.currentSeat = null;
-    addLog(room, `Showdown!`);
+    addLog(room, `Reveal!`);
+
+    // broadcast reveal and schedule showdown resolution
+    broadcastRoom(io, room);
+    setTimeout(() => {
+      const rr = rooms.get(room.code);
+      if (!rr) return;
+      resolveShowdown(rr);
+      rr.state = "showdown";
+      rr.currentSeat = null;
+      console.log(`Room ${rr.code}: advanceStage -> broadcasting SHOWDOWN with winnerInfo=`, rr.winnerInfo);
+      broadcastRoom(io, rr);
+
+      // Auto-start next hand after a pause
+      setTimeout(() => {
+        const r2 = rooms.get(room.code);
+        if (!r2) return;
+        r2.state = "lobby";
+        r2.stage = "preflop";
+        for (const pl of r2.players) {
+          pl.folded = false;
+          pl.allIn = false;
+          pl.betThisRound = 0;
+          pl.committed = 0;
+          pl.hole = [];
+          pl.hasActed = false;
+          pl.lastAction = null;
+        }
+        const seats = activeSeats(r2);
+        if (seats.length >= 2) {
+          r2.state = "hand";
+          beginHand(r2);
+        } else {
+          addLog(r2, "Waiting for at least 2 players with chips to continue.");
+        }
+        broadcastRoom(io, r2);
+      }, 3500);
+    }, 3000);
   }
 }
 
@@ -291,6 +330,7 @@ function resolveShowdown(room) {
   // For each pot, determine winners among eligible.
   const payouts = new Map(); // playerId -> chips won
   const notes = [];
+  const winners = []; // Track main winner info for UI
 
   for (const pot of pots) {
     const elig = pot.eligible.filter(id => solvedById.has(id));
@@ -298,23 +338,35 @@ function resolveShowdown(room) {
 
     const entries = elig.map(id => ({ id, hand: solvedById.get(id) }));
     const winnersHands = Hand.winners(entries.map(e => e.hand));
-    const winners = entries.filter(e => winnersHands.includes(e.hand)).map(e => e.id);
+    const potWinners = entries.filter(e => winnersHands.includes(e.hand)).map(e => e.id);
 
-    const share = Math.floor(pot.amount / winners.length);
-    let remainder = pot.amount - share * winners.length;
+    const share = Math.floor(pot.amount / potWinners.length);
+    let remainder = pot.amount - share * potWinners.length;
 
-    for (const wid of winners) {
+    for (const wid of potWinners) {
       payouts.set(wid, (payouts.get(wid) || 0) + share);
     }
     if (remainder > 0) {
       // Give odd chip(s) to first winner (simple rule for MVP).
-      payouts.set(winners[0], (payouts.get(winners[0]) || 0) + remainder);
+      payouts.set(potWinners[0], (payouts.get(potWinners[0]) || 0) + remainder);
       remainder = 0;
     }
 
-    const prettyWinners = winners.map(id => room.players.find(p => p.id === id)?.name || id).join(", ");
+    const prettyWinners = potWinners.map(id => room.players.find(p => p.id === id)?.name || id).join(", ");
     const descr = winnersHands[0]?.descr || "Winning hand";
+    const hand = winnersHands[0]?.name || "Best hand";
     notes.push(`Pot ${pot.amount} -> ${prettyWinners} (${descr})`);
+    
+    // Store winner info if this is the main pot (or first pot)
+    if (winners.length === 0) {
+      winners.push({
+        playerIds: potWinners,
+        playerNames: prettyWinners,
+        hand: hand,
+        description: descr,
+        amount: pot.amount
+      });
+    }
   }
 
   // Apply payouts
@@ -331,15 +383,66 @@ function resolveShowdown(room) {
   }
   for (const line of notes) addLog(room, line);
 
+  // Store winner info for UI
+  if (winners.length > 0) {
+    room.winnerInfo = winners[0];
+  }
+  
   room.handOverAt = Date.now();
 }
 
 function awardPotTo(room, player) {
   player.stack += room.pot;
   addLog(room, `${player.name} wins the pot (${room.pot}) — everyone else folded.`);
-  room.state = "showdown";
+
+  // Use reveal state so clients display a short reveal animation even when
+  // the win is from everyone else folding.
+  room.state = "reveal";
   room.currentSeat = null;
+  room.winnerInfo = {
+    playerIds: [player.id],
+    playerNames: player.name,
+    hand: "Winning hand",
+    description: "Everyone else folded",
+    amount: room.pot
+  };
   room.handOverAt = Date.now();
+
+  // Broadcast reveal immediately, then resolve showdown after a brief delay
+  broadcastRoom(io, room);
+  setTimeout(() => {
+    const rr = rooms.get(room.code);
+    if (!rr) return;
+    resolveShowdown(rr);
+    rr.state = "showdown";
+    rr.currentSeat = null;
+    broadcastRoom(io, rr);
+
+    // Auto-start next hand (same behavior as normal showdown path)
+    setTimeout(() => {
+      const r2 = rooms.get(room.code);
+      if (!r2) return;
+      r2.state = "lobby";
+      r2.stage = "preflop";
+      for (const pl of r2.players) {
+        pl.folded = false;
+        pl.allIn = false;
+        pl.betThisRound = 0;
+        pl.committed = 0;
+        pl.hole = [];
+        pl.hasActed = false;
+        pl.lastAction = null;
+      }
+      const seats = activeSeats(r2);
+      if (seats.length >= 2) {
+        r2.state = "hand";
+        beginHand(r2);
+      } else {
+        addLog(r2, "Waiting for at least 2 players with chips to continue.");
+      }
+      broadcastRoom(io, r2);
+    }, 3500);
+  }, 3000);
 }
 
 function beginHand(room) {
@@ -398,12 +501,13 @@ function sanitizeFor(room, viewerId) {
       betThisRound: p.betThisRound,
       committed: p.committed,
       connected: p.connected,
-      hole: (room.state === "showdown" || p.id === viewerId) ? p.hole : (p.hole.length ? ["??","??"] : []),
+      hole: (room.state === "showdown" || room.state === "reveal" || p.id === viewerId) ? p.hole : (p.hole.length ? ["??","??"] : []),
     })),
     you: {
       id: viewerId,
       seat: seatOfPlayer(room, viewerId),
     },
+    winnerInfo: room.winnerInfo,
     log: room.log.slice(-40),
     ts: Date.now(),
   };
@@ -452,6 +556,7 @@ io.on("connection", (socket) => {
       createdAt: Date.now(),
       handOverAt: null,
       lastActionAt: Date.now(),
+      winnerInfo: null,
       players: [],
     };
 
@@ -542,7 +647,7 @@ io.on("connection", (socket) => {
     if (!room) return;
     if (socket.id !== room.hostId) return;
 
-    if (room.state !== "lobby") return;
+    if (room.state !== "lobby" && room.state !== "showdown") return;
 
     addLog(room, "Game started!");
     beginHand(room);
@@ -669,9 +774,10 @@ io.on("connection", (socket) => {
           addLog(room, `River: ${prettyCard(room.community[4])}`);
           room.stage = "river";
         } else if (room.stage === "river") {
-          room.state = "showdown";
+          // Enter reveal state so clients can animate showing hole cards
+          room.state = "reveal";
           room.currentSeat = null;
-          addLog(room, "Showdown!");
+          addLog(room, "Reveal!");
         } else {
           break;
         }
@@ -684,42 +790,55 @@ io.on("connection", (socket) => {
         advanceStage(room);
       }
 
-      // If we just moved to showdown, resolve it
-      if (room.state === "showdown") {
-        resolveShowdown(room);
-      }
+      // If we just moved to reveal, broadcast so clients can show hole cards,
+      // then resolve showdown after a short reveal animation.
+      if (room.state === "reveal") {
+        broadcastRoom(io, room);
 
-      broadcastRoom(io, room);
-
-      // Auto-start next hand after a brief pause (MVP convenience)
-      if (room.state === "showdown") {
         setTimeout(() => {
-          // room might be deleted
           const stillRoom = rooms.get(room.code);
           if (!stillRoom) return;
-          // reset everyone who busted? (they stay seated but can't act)
-          stillRoom.state = "lobby";
-          stillRoom.stage = "preflop";
-          for (const pl of stillRoom.players) {
-            pl.folded = false;
-            pl.allIn = false;
-            pl.betThisRound = 0;
-            pl.committed = 0;
-            pl.hole = [];
-            pl.hasActed = false;
-            pl.lastAction = null;
-          }
-          // immediately begin next hand if at least 2 players have chips
-          const seats = activeSeats(stillRoom);
-          if (seats.length >= 2) {
-            stillRoom.state = "hand";
-            beginHand(stillRoom);
-          } else {
-            addLog(stillRoom, "Waiting for at least 2 players with chips to continue.");
-          }
+
+          // Resolve hands and compute winners/payouts
+          resolveShowdown(stillRoom);
+
+          // Move to final showdown state so UI can display winner modal
+          stillRoom.state = "showdown";
+          stillRoom.currentSeat = null;
+          console.log(`Room ${stillRoom.code}: broadcasting SHOWDOWN with winnerInfo=`, stillRoom.winnerInfo);
           broadcastRoom(io, stillRoom);
-        }, 3500);
+
+          // Auto-start next hand after a brief pause (MVP convenience)
+          setTimeout(() => {
+            const rr = rooms.get(room.code);
+            if (!rr) return;
+            rr.state = "lobby";
+            rr.stage = "preflop";
+            for (const pl of rr.players) {
+              pl.folded = false;
+              pl.allIn = false;
+              pl.betThisRound = 0;
+              pl.committed = 0;
+              pl.hole = [];
+              pl.hasActed = false;
+              pl.lastAction = null;
+            }
+            const seats = activeSeats(rr);
+            if (seats.length >= 2) {
+              rr.state = "hand";
+              beginHand(rr);
+            } else {
+              addLog(rr, "Waiting for at least 2 players with chips to continue.");
+            }
+            broadcastRoom(io, rr);
+          }, 3500);
+        }, 3000);
+
+        return;
       }
+
+      // Otherwise just broadcast (normal mid-hand updates)
+      broadcastRoom(io, room);
       return;
     }
 
@@ -755,7 +874,44 @@ io.on("connection", (socket) => {
           if (survivor) awardPotTo(room, survivor);
           else if (shouldEndBettingRound(room)) {
             advanceStage(room);
-            if (room.state === "showdown") resolveShowdown(room);
+            if (room.state === "reveal") {
+              broadcastRoom(io, room);
+              setTimeout(() => {
+                const rr = rooms.get(room.code);
+                if (!rr) return;
+                resolveShowdown(rr);
+                rr.state = "showdown";
+                rr.currentSeat = null;
+                console.log(`Room ${rr.code}: awardPotTo -> broadcasting SHOWDOWN with winnerInfo=`, rr.winnerInfo);
+                broadcastRoom(io, rr);
+
+                setTimeout(() => {
+                  const r2 = rooms.get(room.code);
+                  if (!r2) return;
+                  r2.state = "lobby";
+                  r2.stage = "preflop";
+                  for (const pl of r2.players) {
+                    pl.folded = false;
+                    pl.allIn = false;
+                    pl.betThisRound = 0;
+                    pl.committed = 0;
+                    pl.hole = [];
+                    pl.hasActed = false;
+                    pl.lastAction = null;
+                  }
+                  const seats = activeSeats(r2);
+                  if (seats.length >= 2) {
+                    r2.state = "hand";
+                    beginHand(r2);
+                  } else {
+                    addLog(r2, "Waiting for at least 2 players with chips to continue.");
+                  }
+                  broadcastRoom(io, r2);
+                }, 3500);
+              }, 3000);
+            } else if (room.state === "showdown") {
+              resolveShowdown(room);
+            }
           } else {
             moveToNextActor(room);
           }

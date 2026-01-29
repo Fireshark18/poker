@@ -3,6 +3,7 @@ const socket = io();
 
 let currentCode = null;
 let lastState = null;
+let _revealTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -50,69 +51,115 @@ function render(state) {
   $("communityCards").innerHTML = "";
   for (const c of (state.community || [])) $("communityCards").appendChild(cardEl(c));
 
-  // Players
+  // Players - positioned around the table
   const me = getMe(state);
   const mySeat = me?.seat;
-  $("players").innerHTML = "";
+  $("seatsContainer").innerHTML = "";
 
-  for (const p of state.players) {
-    const row = document.createElement("div");
-    row.className = "playerRow";
-    if (p.id === state.you.id) row.classList.add("me");
-    if (state.state === "hand" && p.seat === state.currentSeat) row.classList.add("turn");
-    if (p.folded) row.classList.add("folded");
+  const totalSeats = 6; // 6-max table
+  const players = state.players;
+  
+  // Create seat positions (arranged in a circle)
+  const seatPositions = {
+    0: { top: '5%', left: '50%', transform: 'translateX(-50%)' },      // Top
+    1: { top: '15%', left: '82%', transform: 'translate(-50%, 0)' },    // Top right
+    2: { top: '50%', left: '90%', transform: 'translate(-50%, -50%)' }, // Right
+    3: { bottom: '10%', left: '82%', transform: 'translate(-50%, 0)' }, // Bottom right
+    4: { bottom: '5%', left: '50%', transform: 'translateX(-50%)' },    // Bottom
+    5: { top: '50%', left: '10%', transform: 'translate(-50%, -50%)' }  // Left
+  };
 
-    const left = document.createElement("div");
-    left.className = "playerLeft";
+  for (const p of players) {
+    const seatPos = seatPositions[p.seat];
+    if (!seatPos) continue;
+
+    const seatEl = document.createElement("div");
+    seatEl.className = "playerSeat";
+    seatEl.style.top = seatPos.top || 'auto';
+    seatEl.style.bottom = seatPos.bottom || 'auto';
+    seatEl.style.left = seatPos.left;
+    seatEl.style.transform = seatPos.transform;
+
+    // Avatar
+    const avatar = document.createElement("div");
+    avatar.className = "playerAvatar";
+    if (p.id === state.you.id) avatar.classList.add("me");
+    if (state.state === "hand" && p.seat === state.currentSeat) avatar.classList.add("turn");
+    if (p.folded) avatar.classList.add("folded");
+    
+    // Use first letter of name as avatar
+    avatar.textContent = p.name[0].toUpperCase();
+    seatEl.appendChild(avatar);
+
+    // Show hole cards if present (during reveal/showdown or for viewer)
+    if (p.hole && p.hole.length) {
+      const mini = document.createElement('div');
+      mini.className = 'miniHole';
+      for (const c of p.hole) {
+        const m = cardEl(c);
+        m.classList.add('miniCard');
+        mini.appendChild(m);
+      }
+      seatEl.appendChild(mini);
+    }
+    // Bet amount if exists
+    if (p.betThisRound) {
+      const betEl = document.createElement("div");
+      betEl.className = "playerBet";
+      betEl.textContent = `${p.betThisRound}`;
+      avatar.appendChild(betEl);
+    }
+
+    // Info
+    const info = document.createElement("div");
+    info.className = "playerInfo";
 
     const name = document.createElement("div");
     name.className = "playerName";
-    name.textContent = `${p.name} (seat ${p.seat})`;
+    name.textContent = p.name;
+    info.appendChild(name);
 
-    const meta = document.createElement("div");
-    meta.className = "playerMeta";
-    const betPart = p.betThisRound ? ` · bet ${p.betThisRound}` : "";
-    const connPart = p.connected ? "" : " · disconnected";
-    meta.textContent = `stack ${p.stack}${betPart}${connPart}`;
+    const stack = document.createElement("div");
+    stack.className = "playerStack";
+    stack.textContent = `Stack: ${p.stack}${p.connected ? '' : ' [DC]'}`;
+    info.appendChild(stack);
 
-    left.appendChild(name);
-    left.appendChild(meta);
-
-    const right = document.createElement("div");
-    right.style.display = "flex";
-    right.style.gap = "6px";
-    right.style.alignItems = "center";
-
+    // Badges
+    const badges = document.createElement("div");
+    badges.className = "playerBadges";
+    
     if (p.seat === state.dealerSeat) {
       const b = document.createElement("span");
       b.className = "badge dealer";
       b.textContent = "D";
-      right.appendChild(b);
+      badges.appendChild(b);
     }
     if (p.allIn) {
       const b = document.createElement("span");
       b.className = "badge allin";
       b.textContent = "ALL-IN";
-      right.appendChild(b);
+      badges.appendChild(b);
     }
     if (p.folded) {
       const b = document.createElement("span");
       b.className = "badge folded";
       b.textContent = "FOLD";
-      right.appendChild(b);
+      badges.appendChild(b);
     }
 
-    // Show small hole preview (?? ?? for others until showdown)
-    if ((p.hole || []).length) {
-      const mini = document.createElement("span");
-      mini.className = "badge";
-      mini.textContent = p.hole.map(prettyCard).join(" ");
-      right.appendChild(mini);
+    if (badges.children.length > 0) {
+      info.appendChild(badges);
     }
 
-    row.appendChild(left);
-    row.appendChild(right);
-    $("players").appendChild(row);
+    seatEl.appendChild(info);
+    $("seatsContainer").appendChild(seatEl);
+  }
+
+  // Reveal animation: add class to table during reveal state
+  const pokerTableEl = document.querySelector('.pokerTable');
+  if (pokerTableEl) {
+    if (state.state === 'reveal') pokerTableEl.classList.add('revealing');
+    else pokerTableEl.classList.remove('revealing');
   }
 
   // Your hand
@@ -155,6 +202,37 @@ function render(state) {
   const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
   logEl.textContent = logText;
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+
+  // Show winner modal if hand is over and winner info exists
+  // If server enters 'reveal', show reveal animations and schedule winner modal locally
+  if (state.state === "reveal" && state.winnerInfo) {
+    // ensure modal hidden during reveal animation
+    $("winnerModal").classList.add("hidden");
+    // clear any existing timer
+    if (_revealTimer) { clearTimeout(_revealTimer); _revealTimer = null; }
+    // schedule to show winner modal after reveal animation (3s)
+    _revealTimer = setTimeout(() => {
+      const winner = state.winnerInfo;
+      $("winnerName").textContent = winner.playerNames;
+      $("winnerAmount").textContent = `+${winner.amount}`;
+      $("winnerHand").textContent = winner.hand;
+      $("winnerDescription").textContent = winner.description;
+      $("winnerModal").classList.remove("hidden");
+      _revealTimer = null;
+    }, 3000);
+  } else if (state.state === "showdown" && state.winnerInfo) {
+    // show immediately if server already moved to showdown
+    if (_revealTimer) { clearTimeout(_revealTimer); _revealTimer = null; }
+    const winner = state.winnerInfo;
+    $("winnerName").textContent = winner.playerNames;
+    $("winnerAmount").textContent = `+${winner.amount}`;
+    $("winnerHand").textContent = winner.hand;
+    $("winnerDescription").textContent = winner.description;
+    $("winnerModal").classList.remove("hidden");
+  } else {
+    if (_revealTimer) { clearTimeout(_revealTimer); _revealTimer = null; }
+    $("winnerModal").classList.add("hidden");
+  }
 }
 
 // ---- Wire up UI ----
@@ -177,6 +255,11 @@ $("btnSetBlinds").addEventListener("click", () => {
     smallBlind: Number($("sbInput").value),
     bigBlind: Number($("bbInput").value),
   });
+});
+
+$("btnNextHand").addEventListener("click", () => {
+  if (!currentCode) return;
+  socket.emit("startGame", { code: currentCode });
 });
 
 $("btnStart").addEventListener("click", () => {
