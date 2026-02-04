@@ -19,6 +19,11 @@ function cardEl(card) {
   const d = document.createElement("div");
   d.className = "cardFace";
   d.textContent = prettyCard(card);
+  // color red for hearts/diamonds
+  if (card && card !== "??") {
+    const s = card[1];
+    if (s === 'h' || s === 'd') d.classList.add('red');
+  }
   return d;
 }
 
@@ -255,6 +260,11 @@ $("btnSetBlinds").addEventListener("click", () => {
     smallBlind: Number($("sbInput").value),
     bigBlind: Number($("bbInput").value),
   });
+});
+
+$("btnAddBot")?.addEventListener("click", () => {
+  if (!currentCode) return;
+  socket.emit("addBot", { code: currentCode });
 });
 
 $("btnNextHand").addEventListener("click", () => {

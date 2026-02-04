@@ -530,6 +530,9 @@ button.danger:hover{ background: rgba(255,107,107,.25); }
   box-shadow: 0 4px 8px rgba(0,0,0,0.3);
 }
 
+/* red suits */
+.cardFace.red{ color: #b00; }
+
 /* Winner Modal */
 .modal{
   position: fixed;

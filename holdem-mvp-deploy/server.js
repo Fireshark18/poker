@@ -517,7 +517,213 @@ function broadcastRoom(io, room) {
   for (const p of room.players) {
     io.to(p.id).emit("roomState", sanitizeFor(room, p.id));
   }
+  // If there's a bot whose turn it is, schedule its action
+  try { scheduleBotIfNeeded(room); } catch (e) { /* swallow */ }
 }
+
+// --- Bot support ---
+function isBotPlayer(p) {
+  return !!p.bot;
+}
+
+function scheduleBotIfNeeded(room) {
+  if (room.state !== 'hand' || room.currentSeat === null) return;
+  const p = room.players.find(x => x.seat === room.currentSeat);
+  if (!p || !isBotPlayer(p)) return;
+  if (room.botTimer) return; // already scheduled
+
+  room.botTimer = setTimeout(() => {
+    room.botTimer = null;
+    const bot = room.players.find(x => x.seat === room.currentSeat);
+    if (!bot) return;
+    if (bot.folded || bot.allIn) return;
+
+    const callAmount = Math.max(0, room.currentBet - bot.betThisRound);
+
+    // Simple heuristics
+    if (callAmount === 0) {
+      // decide to check or bet
+      if (Math.random() < 0.35 && bot.stack > room.bigBlind) {
+        const desired = Math.min(bot.betThisRound + room.bigBlind, bot.betThisRound + bot.stack);
+        handlePlayerAction(room, bot, 'bet', desired, true);
+      } else {
+        handlePlayerAction(room, bot, 'call', undefined, true); // acts as check when callAmount==0
+      }
+    } else {
+      // decide to call or fold
+      const affordable = Math.min(callAmount, bot.stack);
+      if (callAmount <= Math.max(1, Math.floor(bot.stack * 0.25)) || Math.random() < 0.25) {
+        handlePlayerAction(room, bot, 'call', undefined, true);
+      } else {
+        handlePlayerAction(room, bot, 'fold', undefined, true);
+      }
+    }
+  }, 800 + Math.floor(Math.random() * 600));
+}
+
+function handlePlayerAction(room, p, action, amount, isBot = false) {
+  // Mirror logic from socket handler but callable for bots
+  if (!p) return;
+  if (room.state !== "hand") return;
+  if (room.currentSeat === null) return;
+  if (p.seat !== room.currentSeat) return;
+  if (p.folded || p.allIn) return;
+
+  const callAmount = Math.max(0, room.currentBet - p.betThisRound);
+
+  action = (action || "").toLowerCase();
+
+  if (action === "fold") {
+    p.folded = true;
+    p.hasActed = true;
+    p.lastAction = "fold";
+    addLog(room, `${p.name} folds.`);
+  } else if (action === "check") {
+    if (callAmount !== 0) return;
+    p.hasActed = true;
+    p.lastAction = "check";
+    addLog(room, `${p.name} checks.`);
+  } else if (action === "call") {
+    if (callAmount === 0) {
+      p.hasActed = true;
+      p.lastAction = "check";
+      addLog(room, `${p.name} checks.`);
+    } else {
+      const paid = commitChips(room, p, callAmount);
+      p.hasActed = true;
+      p.lastAction = p.allIn ? `call all-in ${paid}` : `call ${paid}`;
+      addLog(room, `${p.name} calls ${paid}${p.allIn ? " (all-in)" : ""}.`);
+    }
+  } else if (action === "bet" || action === "raise") {
+    const desiredTotal = Math.floor(Number(amount) || 0);
+    if (desiredTotal <= 0) return;
+
+    const prevBet = room.currentBet;
+    const minTo = prevBet === 0 ? room.bigBlind : prevBet + room.minRaise;
+
+    const maxTotalPossible = p.betThisRound + p.stack;
+    const clamped = Math.min(desiredTotal, maxTotalPossible);
+
+    if (clamped < minTo && clamped !== maxTotalPossible) return;
+
+    const toPay = clamped - p.betThisRound;
+    if (toPay <= 0) return;
+
+    commitChips(room, p, toPay);
+
+    const raiseSize = clamped - prevBet;
+    if (clamped > prevBet) {
+      room.currentBet = clamped;
+      if (raiseSize >= room.minRaise) room.minRaise = raiseSize;
+      room.lastAggressorSeat = p.seat;
+
+      for (const other of room.players) {
+        if (other.id === p.id) continue;
+        if (other.folded || other.allIn) continue;
+        other.hasActed = false;
+      }
+    }
+
+    p.hasActed = true;
+    p.lastAction = p.allIn ? `${action} all-in to ${room.currentBet}` : `${action} to ${room.currentBet}`;
+    addLog(room, `${p.name} ${prevBet === 0 ? "bets" : "raises"} to ${room.currentBet}${p.allIn ? " (all-in)" : ""}.`);
+  } else {
+    return;
+  }
+
+  // clear any scheduled bot timer for this room (we will reschedule if needed)
+  if (room.botTimer) { clearTimeout(room.botTimer); room.botTimer = null; }
+
+  const survivor = loneSurvivor(room);
+  if (survivor) {
+    awardPotTo(room, survivor);
+    broadcastRoom(io, room);
+    return;
+  }
+
+  if (shouldEndBettingRound(room)) {
+    while (room.state === "hand") {
+      const stillCanAct = room.players.some(x => !x.folded && !x.allIn && x.stack >= 0);
+      if (stillCanAct && room.stage !== "river") break;
+      if (stillCanAct && room.stage === "river") break;
+
+      if (room.stage === "preflop") {
+        room.community.push(room.deck.pop(), room.deck.pop(), room.deck.pop());
+        addLog(room, `Flop: ${room.community.map(prettyCard).join(" ")}`);
+        room.stage = "flop";
+      } else if (room.stage === "flop") {
+        room.community.push(room.deck.pop());
+        addLog(room, `Turn: ${prettyCard(room.community[3])}`);
+        room.stage = "turn";
+      } else if (room.stage === "turn") {
+        room.community.push(room.deck.pop());
+        addLog(room, `River: ${prettyCard(room.community[4])}`);
+        room.stage = "river";
+      } else if (room.stage === "river") {
+        room.state = "reveal";
+        room.currentSeat = null;
+        addLog(room, "Reveal!");
+      } else {
+        break;
+      }
+
+      if (room.state === "showdown") break;
+    }
+
+    if (room.state === "hand") {
+      advanceStage(room);
+    }
+
+    if (room.state === "reveal") {
+      broadcastRoom(io, room);
+
+      setTimeout(() => {
+        const stillRoom = rooms.get(room.code);
+        if (!stillRoom) return;
+
+        resolveShowdown(stillRoom);
+
+        stillRoom.state = "showdown";
+        stillRoom.currentSeat = null;
+        console.log(`Room ${stillRoom.code}: broadcasting SHOWDOWN with winnerInfo=`, stillRoom.winnerInfo);
+        broadcastRoom(io, stillRoom);
+
+        setTimeout(() => {
+          const rr = rooms.get(room.code);
+          if (!rr) return;
+          rr.state = "lobby";
+          rr.stage = "preflop";
+          for (const pl of rr.players) {
+            pl.folded = false;
+            pl.allIn = false;
+            pl.betThisRound = 0;
+            pl.committed = 0;
+            pl.hole = [];
+            pl.hasActed = false;
+            pl.lastAction = null;
+          }
+          const seats = activeSeats(rr);
+          if (seats.length >= 2) {
+            rr.state = "hand";
+            beginHand(rr);
+          } else {
+            addLog(rr, "Waiting for at least 2 players with chips to continue.");
+          }
+          broadcastRoom(io, rr);
+        }, 3500);
+      }, 3000);
+
+      return;
+    }
+
+    broadcastRoom(io, room);
+    return;
+  }
+
+  moveToNextActor(room);
+  broadcastRoom(io, room);
+  }
+
 
 // ---- Server ----
 const app = express();
@@ -654,6 +860,36 @@ io.on("connection", (socket) => {
     broadcastRoom(io, room);
   });
 
+  socket.on("addBot", ({ code }) => {
+    const room = rooms.get((code || "").toUpperCase());
+    if (!room) return;
+    if (socket.id !== room.hostId) return;
+
+    const seat = assignSeat(room);
+    if (seat === null) return;
+
+    const botId = `bot:${makeRoomCode(6)}`;
+    const botName = `Bot-${Math.floor(Math.random()*9000)+1000}`;
+    room.players.push({
+      id: botId,
+      name: botName,
+      seat,
+      stack: STARTING_STACK,
+      connected: true,
+      folded: false,
+      allIn: false,
+      betThisRound: 0,
+      committed: 0,
+      hole: [],
+      hasActed: false,
+      lastAction: null,
+      bot: true,
+    });
+
+    addLog(room, `${botName} (bot) joined (seat ${seat}).`);
+    broadcastRoom(io, room);
+  });
+
   socket.on("chat", ({ code, message }) => {
     const room = rooms.get((code || "").toUpperCase());
     if (!room) return;
@@ -671,180 +907,10 @@ io.on("connection", (socket) => {
     const room = rooms.get((code || "").toUpperCase());
     if (!room) return;
 
-    if (room.state !== "hand") return;
-    if (room.currentSeat === null) return;
-
     const p = room.players.find(p => p.id === socket.id);
     if (!p) return;
 
-    if (p.seat !== room.currentSeat) return; // not your turn
-    if (p.folded || p.allIn) return;
-
-    const callAmount = Math.max(0, room.currentBet - p.betThisRound);
-
-    action = (action || "").toLowerCase();
-
-    if (action === "fold") {
-      p.folded = true;
-      p.hasActed = true;
-      p.lastAction = "fold";
-      addLog(room, `${p.name} folds.`);
-    } else if (action === "check") {
-      if (callAmount !== 0) return; // can't check facing a bet
-      p.hasActed = true;
-      p.lastAction = "check";
-      addLog(room, `${p.name} checks.`);
-    } else if (action === "call") {
-      if (callAmount === 0) {
-        p.hasActed = true;
-        p.lastAction = "check";
-        addLog(room, `${p.name} checks.`);
-      } else {
-        const paid = commitChips(room, p, callAmount);
-        p.hasActed = true;
-        p.lastAction = p.allIn ? `call all-in ${paid}` : `call ${paid}`;
-        addLog(room, `${p.name} calls ${paid}${p.allIn ? " (all-in)" : ""}.`);
-      }
-    } else if (action === "bet" || action === "raise") {
-      const desiredTotal = Math.floor(Number(amount) || 0);
-      if (desiredTotal <= 0) return;
-
-      const prevBet = room.currentBet;
-      const minTo = prevBet === 0 ? room.bigBlind : prevBet + room.minRaise;
-
-      // allow all-in even if below min raise
-      const maxTotalPossible = p.betThisRound + p.stack;
-      const clamped = Math.min(desiredTotal, maxTotalPossible);
-
-      if (clamped < minTo && clamped !== maxTotalPossible) return;
-
-      const toPay = clamped - p.betThisRound;
-      if (toPay <= 0) return;
-
-      commitChips(room, p, toPay);
-
-      const raiseSize = clamped - prevBet;
-      if (clamped > prevBet) {
-        room.currentBet = clamped;
-        if (raiseSize >= room.minRaise) room.minRaise = raiseSize;
-        room.lastAggressorSeat = p.seat;
-
-        // everyone else (still live + not all-in) needs to respond again
-        for (const other of room.players) {
-          if (other.id === p.id) continue;
-          if (other.folded || other.allIn) continue;
-          other.hasActed = false;
-        }
-      }
-
-      p.hasActed = true;
-      p.lastAction = p.allIn ? `${action} all-in to ${room.currentBet}` : `${action} to ${room.currentBet}`;
-      addLog(room, `${p.name} ${prevBet === 0 ? "bets" : "raises"} to ${room.currentBet}${p.allIn ? " (all-in)" : ""}.`);
-    } else {
-      return;
-    }
-
-    // If only one player remains, award pot and end hand
-    const survivor = loneSurvivor(room);
-    if (survivor) {
-      awardPotTo(room, survivor);
-      broadcastRoom(io, room);
-      return;
-    }
-
-    // If betting round complete or everyone all-in, advance stages as needed
-    if (shouldEndBettingRound(room)) {
-      // If everyone is all-in (or folded), deal remaining streets and go showdown
-      while (room.state === "hand") {
-        const stillCanAct = room.players.some(x => !x.folded && !x.allIn && x.stack >= 0);
-        if (stillCanAct && room.stage !== "river") break;
-        if (stillCanAct && room.stage === "river") break;
-
-        // no one can act -> fast-forward
-        if (room.stage === "preflop") {
-          room.community.push(room.deck.pop(), room.deck.pop(), room.deck.pop());
-          addLog(room, `Flop: ${room.community.map(prettyCard).join(" ")}`);
-          room.stage = "flop";
-        } else if (room.stage === "flop") {
-          room.community.push(room.deck.pop());
-          addLog(room, `Turn: ${prettyCard(room.community[3])}`);
-          room.stage = "turn";
-        } else if (room.stage === "turn") {
-          room.community.push(room.deck.pop());
-          addLog(room, `River: ${prettyCard(room.community[4])}`);
-          room.stage = "river";
-        } else if (room.stage === "river") {
-          // Enter reveal state so clients can animate showing hole cards
-          room.state = "reveal";
-          room.currentSeat = null;
-          addLog(room, "Reveal!");
-        } else {
-          break;
-        }
-
-        // If still no actors and we reached river, keep looping to showdown.
-        if (room.state === "showdown") break;
-      }
-
-      if (room.state === "hand") {
-        advanceStage(room);
-      }
-
-      // If we just moved to reveal, broadcast so clients can show hole cards,
-      // then resolve showdown after a short reveal animation.
-      if (room.state === "reveal") {
-        broadcastRoom(io, room);
-
-        setTimeout(() => {
-          const stillRoom = rooms.get(room.code);
-          if (!stillRoom) return;
-
-          // Resolve hands and compute winners/payouts
-          resolveShowdown(stillRoom);
-
-          // Move to final showdown state so UI can display winner modal
-          stillRoom.state = "showdown";
-          stillRoom.currentSeat = null;
-          console.log(`Room ${stillRoom.code}: broadcasting SHOWDOWN with winnerInfo=`, stillRoom.winnerInfo);
-          broadcastRoom(io, stillRoom);
-
-          // Auto-start next hand after a brief pause (MVP convenience)
-          setTimeout(() => {
-            const rr = rooms.get(room.code);
-            if (!rr) return;
-            rr.state = "lobby";
-            rr.stage = "preflop";
-            for (const pl of rr.players) {
-              pl.folded = false;
-              pl.allIn = false;
-              pl.betThisRound = 0;
-              pl.committed = 0;
-              pl.hole = [];
-              pl.hasActed = false;
-              pl.lastAction = null;
-            }
-            const seats = activeSeats(rr);
-            if (seats.length >= 2) {
-              rr.state = "hand";
-              beginHand(rr);
-            } else {
-              addLog(rr, "Waiting for at least 2 players with chips to continue.");
-            }
-            broadcastRoom(io, rr);
-          }, 3500);
-        }, 3000);
-
-        return;
-      }
-
-      // Otherwise just broadcast (normal mid-hand updates)
-      broadcastRoom(io, room);
-      return;
-    }
-
-    // Otherwise, just advance to next actor
-    moveToNextActor(room);
-    broadcastRoom(io, room);
+    handlePlayerAction(room, p, action, amount, false);
   });
 
   socket.on("disconnect", () => {
