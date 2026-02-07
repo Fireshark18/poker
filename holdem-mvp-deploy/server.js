@@ -76,7 +76,7 @@ function nextActiveSeat(room, fromSeat, opts = {}) {
 }
 
 function actingPlayers(room) {
-  return room.players.filter(p => !p.folded && !p.allIn && p.stack >= 0);
+  return room.players.filter(p => !p.folded && !p.allIn && p.stack > 0);
 }
 
 function livePlayers(room) {
@@ -133,7 +133,7 @@ function resetForNewHand(room) {
   room.winnerInfo = null;
 
   for (const p of room.players) {
-    p.folded = false;
+    p.folded = p.stack <= 0;
     p.allIn = false;
     p.betThisRound = 0;
     p.committed = 0;
@@ -234,7 +234,7 @@ function firstToActPreflop(room, bbSeat) {
     // Heads-up: SB (dealer) acts first preflop
     return room.dealerSeat;
   }
-  return nextActiveSeat(room, bbSeat, { includeAllIn: false, includeFolded: false });
+  return nextActiveSeat(room, bbSeat, { includeAllIn: false, includeFolded: false, requireStack: true });
 }
 
 function advanceStage(room) {
@@ -277,7 +277,7 @@ function advanceStage(room) {
         r2.state = "lobby";
         r2.stage = "preflop";
         for (const pl of r2.players) {
-          pl.folded = false;
+          pl.folded = pl.stack <= 0;
           pl.allIn = false;
           pl.betThisRound = 0;
           pl.committed = 0;
@@ -312,6 +312,111 @@ function buildSidePots(players) {
     prev = level;
   }
   return pots;
+}
+
+function calculateHandEquity(room) {
+  // Calculate equity for remaining (non-folded) players
+  // Returns array of { playerId, playerName, hand, handName, equity }
+  const remainingPlayers = room.players.filter(p => !p.folded);
+  if (remainingPlayers.length < 2) return [];
+
+  const board = room.community;
+  const remainingCards = getAllRemainingCards(board, remainingPlayers);
+  
+  // Evaluate current best hand for each player
+  const results = [];
+  for (const p of remainingPlayers) {
+    const cards = [...board, ...p.hole];
+    const solved = Hand.solve(cards, "standard");
+    results.push({
+      playerId: p.id,
+      playerName: p.name,
+      hand: solved,
+      handName: solved.name,
+      handDescr: solved.descr,
+      equity: 0 // will be calculated below
+    });
+  }
+
+  // Simple equity calculation: simulate all possible remaining cards
+  if (remainingCards.length === 0 || remainingCards.length > 5) {
+    // Already at showdown or too early; just rank by current hand strength
+    // Sort hands using Hand.winners() for proper poker hand ranking
+    let remaining = [...results];
+    let equityPoints = [];
+    
+    while (remaining.length > 0) {
+      const hands = remaining.map(r => r.hand);
+      const winners = Hand.winners(hands);
+      const winnersSet = new Set(winners);
+      
+      const ranking = winners.length > 0 ? winners.length : 1;
+      for (const r of remaining) {
+        if (winnersSet.has(r.hand)) {
+          equityPoints.push({ playerId: r.playerId, points: remaining.length });
+        }
+      }
+      
+      remaining = remaining.filter(r => !winnersSet.has(r.hand));
+    }
+    
+    // Assign equity based on points
+    const totalPoints = equityPoints.reduce((sum, ep) => sum + ep.points, 0);
+    for (const result of results) {
+      const ep = equityPoints.find(e => e.playerId === result.playerId);
+      result.equity = ep ? Math.round(ep.points * 100 / totalPoints) : 0;
+    }
+  } else {
+    // Do a quick Monte Carlo with remaining cards
+    const trials = Math.min(5000, 2 ** remainingCards.length); // limit trials
+    const wins = new Map(results.map(r => [r.playerId, 0]));
+    
+    for (let trial = 0; trial < trials; trial++) {
+      const shuffled = [...remainingCards];
+      shuffleInPlace(shuffled);
+      const boardCopy = [...board, ...shuffled.slice(0, 5 - board.length)];
+      
+      const hands = results.map(r => ({
+        playerId: r.playerId,
+        hand: Hand.solve([...boardCopy, ...room.players.find(p => p.id === r.playerId).hole], "standard")
+      }));
+      
+      const winningHands = Hand.winners(hands.map(h => h.hand));
+      for (const hand of winningHands) {
+        const pid = hands.find(h => h.hand === hand)?.playerId;
+        if (pid) wins.set(pid, (wins.get(pid) || 0) + 1);
+      }
+    }
+    
+    for (const r of results) {
+      r.equity = Math.round((wins.get(r.playerId) || 0) * 100 / trials);
+    }
+  }
+
+  return results;
+}
+
+function getAllRemainingCards(board, players) {
+  const used = new Set([...board, ...players.flatMap(p => p.hole)]);
+  const all = [];
+  for (const r of RANKS) {
+    for (const s of SUITS) {
+      const card = r + s;
+      if (!used.has(card)) all.push(card);
+    }
+  }
+  return all;
+}
+
+function getHandRank(community, hole) {
+  // Helper to get hand rank name and description for a given hole cards
+  if (!community || !hole || hole.length !== 2) return null;
+  const cards = [...community, ...hole];
+  const solved = Hand.solve(cards, "standard");
+  return {
+    name: solved.name,
+    descr: solved.descr
+  };
 }
 
 function resolveShowdown(room) {
@@ -419,20 +524,20 @@ function awardPotTo(room, player) {
     broadcastRoom(io, rr);
 
     // Auto-start next hand (same behavior as normal showdown path)
-    setTimeout(() => {
-      const r2 = rooms.get(room.code);
-      if (!r2) return;
-      r2.state = "lobby";
-      r2.stage = "preflop";
-      for (const pl of r2.players) {
-        pl.folded = false;
-        pl.allIn = false;
-        pl.betThisRound = 0;
-        pl.committed = 0;
-        pl.hole = [];
-        pl.hasActed = false;
-        pl.lastAction = null;
-      }
+      setTimeout(() => {
+        const r2 = rooms.get(room.code);
+        if (!r2) return;
+        r2.state = "lobby";
+        r2.stage = "preflop";
+        for (const pl of r2.players) {
+          pl.folded = pl.stack <= 0;
+          pl.allIn = false;
+          pl.betThisRound = 0;
+          pl.committed = 0;
+          pl.hole = [];
+          pl.hasActed = false;
+          pl.lastAction = null;
+        }
       const seats = activeSeats(r2);
       if (seats.length >= 2) {
         r2.state = "hand";
@@ -472,12 +577,21 @@ function beginHand(room) {
 }
 
 function moveToNextActor(room) {
-  const next = nextActiveSeat(room, room.currentSeat, { includeAllIn: false, includeFolded: false });
+  const next = nextActiveSeat(room, room.currentSeat, { includeAllIn: false, includeFolded: false, requireStack: true });
   room.currentSeat = next;
   room.lastActionAt = Date.now();
 }
 
 function sanitizeFor(room, viewerId) {
+  const viewer = room.players.find(p => p.id === viewerId);
+  const isSpectator = viewer && viewer.stack <= 0;
+  
+  // Calculate equity for spectators - includes hand names
+  let equityInfo = null;
+  if (isSpectator && room.state === "hand") {
+    equityInfo = calculateHandEquity(room);
+  }
+  
   return {
     code: room.code,
     hostId: room.hostId,
@@ -501,12 +615,15 @@ function sanitizeFor(room, viewerId) {
       betThisRound: p.betThisRound,
       committed: p.committed,
       connected: p.connected,
-      hole: (room.state === "showdown" || room.state === "reveal" || p.id === viewerId) ? p.hole : (p.hole.length ? ["??","??"] : []),
+      hole: (room.state === "showdown" || room.state === "reveal" || p.id === viewerId || isSpectator) ? p.hole : (p.hole.length ? ["??","??"] : []),
+      handRank: isSpectator && room.state === "hand" && p.hole && p.hole.length === 2 && !p.folded ? getHandRank(room.community, p.hole) : null,
     })),
     you: {
       id: viewerId,
       seat: seatOfPlayer(room, viewerId),
+      isSpectator: isSpectator,
     },
+    equityInfo: equityInfo,
     winnerInfo: room.winnerInfo,
     log: room.log.slice(-40),
     ts: Date.now(),
@@ -594,6 +711,33 @@ function handlePlayerAction(room, p, action, amount, isBot = false) {
       p.lastAction = p.allIn ? `call all-in ${paid}` : `call ${paid}`;
       addLog(room, `${p.name} calls ${paid}${p.allIn ? " (all-in)" : ""}.`);
     }
+  } else if (action === "all-in") {
+    // Commit all remaining stack as a bet/raise
+    const desiredTotal = p.betThisRound + p.stack;
+    if (desiredTotal <= 0) return;
+
+    const prevBet = room.currentBet;
+    const toPay = Math.min(p.stack, Math.max(0, desiredTotal - p.betThisRound));
+    if (toPay <= 0) return;
+
+    commitChips(room, p, toPay);
+
+    if (desiredTotal > prevBet) {
+      room.currentBet = desiredTotal;
+      const raiseSize = desiredTotal - prevBet;
+      if (raiseSize >= room.minRaise) room.minRaise = raiseSize;
+      room.lastAggressorSeat = p.seat;
+
+      for (const other of room.players) {
+        if (other.id === p.id) continue;
+        if (other.folded || other.allIn) continue;
+        other.hasActed = false;
+      }
+    }
+
+    p.hasActed = true;
+    p.lastAction = `all-in to ${room.currentBet}`;
+    addLog(room, `${p.name} goes all-in to ${room.currentBet}.`);
   } else if (action === "bet" || action === "raise") {
     const desiredTotal = Math.floor(Number(amount) || 0);
     if (desiredTotal <= 0) return;
@@ -694,7 +838,7 @@ function handlePlayerAction(room, p, action, amount, isBot = false) {
           rr.state = "lobby";
           rr.stage = "preflop";
           for (const pl of rr.players) {
-            pl.folded = false;
+            pl.folded = pl.stack <= 0;
             pl.allIn = false;
             pl.betThisRound = 0;
             pl.committed = 0;
@@ -896,6 +1040,9 @@ io.on("connection", (socket) => {
     const p = room.players.find(p => p.id === socket.id);
     if (!p) return;
 
+    // Prevent spectators (stack <= 0) from chatting
+    if (p.stack <= 0) return;
+
     message = (message || "").toString().trim().slice(0, 160);
     if (!message) return;
 
@@ -910,6 +1057,7 @@ io.on("connection", (socket) => {
     const p = room.players.find(p => p.id === socket.id);
     if (!p) return;
 
+    console.log(`[DEBUG] Player action: ${p.name} - action="${action}", amount=${amount}`);
     handlePlayerAction(room, p, action, amount, false);
   });
 

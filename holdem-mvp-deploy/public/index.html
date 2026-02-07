@@ -100,6 +100,7 @@
             <div class="actionButtons">
               <button id="btnFold" class="btn-fold">Fold</button>
               <button id="btnCheckCall" class="btn-check-call">Check</button>
+              <button id="btnAllIn" class="btn-all-in">All In</button>
             </div>
             <div class="raiseBox">
               <input id="raiseAmount" type="number" min="1" step="1" placeholder="Raise to…" />
@@ -107,6 +108,9 @@
             </div>
             <div class="muted small" id="turnHint"></div>
           </div>
+
+          <!-- Equity Info (for spectators) -->
+          <div class="equityPanel" id="equityInfo"></div>
 
           <!-- Chat/Log -->
           <div class="chatPanel">

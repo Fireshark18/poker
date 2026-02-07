@@ -91,6 +91,7 @@ function render(state) {
     if (p.id === state.you.id) avatar.classList.add("me");
     if (state.state === "hand" && p.seat === state.currentSeat) avatar.classList.add("turn");
     if (p.folded) avatar.classList.add("folded");
+    if (p.allIn) avatar.classList.add("all-in");
     
     // Use first letter of name as avatar
     avatar.textContent = p.name[0].toUpperCase();
@@ -128,6 +129,16 @@ function render(state) {
     stack.className = "playerStack";
     stack.textContent = `Stack: ${p.stack}${p.connected ? '' : ' [DC]'}`;
     info.appendChild(stack);
+
+    // Show hand rank for spectators
+    if (p.handRank && p.handRank.name) {
+      const handDiv = document.createElement("div");
+      handDiv.className = "playerHandRank";
+      handDiv.textContent = p.handRank.name;
+      handDiv.style.fontSize = "0.85em";
+      handDiv.style.color = "#888";
+      info.appendChild(handDiv);
+    }
 
     // Badges
     const badges = document.createElement("div");
@@ -185,6 +196,7 @@ function render(state) {
 
   $("btnFold").disabled = !isYourTurn;
   $("btnRaise").disabled = !isYourTurn;
+  $("btnAllIn").disabled = !isYourTurn || (me && me.stack <= 0);
 
   // Check/Call label
   if (!isYourTurn) {
@@ -207,6 +219,31 @@ function render(state) {
   const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
   logEl.textContent = logText;
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+
+  // Chat - disable for spectators
+  const isSpectator = state.you?.isSpectator;
+  $("chatInput").disabled = isSpectator;
+  $("btnChat").disabled = isSpectator;
+  if (isSpectator) {
+    $("chatInput").placeholder = "Spectators cannot chat";
+  }
+
+  // Equity info for spectators
+  if (isSpectator && state.equityInfo && state.equityInfo.length > 0) {
+    const equityEl = document.getElementById("equityInfo");
+    if (equityEl) {
+      equityEl.innerHTML = "<h4>Remaining Players & Win %</h4>";
+      for (const info of state.equityInfo) {
+        const div = document.createElement("div");
+        div.className = "equityRow";
+        div.innerHTML = `<div class="equityName">${info.playerName}</div><div class="equityHand">${info.handName}</div><div class="equityPercent">${info.equity}%</div>`;
+        equityEl.appendChild(div);
+      }
+    }
+  } else {
+    const equityEl = document.getElementById("equityInfo");
+    if (equityEl) equityEl.innerHTML = "";
+  }
 
   // Show winner modal if hand is over and winner info exists
   // If server enters 'reveal', show reveal animations and schedule winner modal locally
@@ -296,6 +333,21 @@ $("btnRaise").addEventListener("click", () => {
   const action = (lastState?.currentBet || 0) === 0 ? "bet" : "raise";
   socket.emit("playerAction", { code: currentCode, action, amount: amt });
   $("raiseAmount").value = "";
+});
+
+$("btnAllIn").addEventListener("click", () => {
+  if (!currentCode) {
+    return;
+  }
+  const me = getMe(lastState);
+  if (!me) {
+    return;
+  }
+  if (me.stack <= 0) {
+    return;
+  }
+  const totalChips = me.betThisRound + me.stack;
+  socket.emit("playerAction", { code: currentCode, action: "all-in", amount: totalChips });
 });
 
 $("btnChat").addEventListener("click", () => {
